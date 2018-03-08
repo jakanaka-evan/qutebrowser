@@ -21,12 +21,16 @@
 
 import traceback
 
-from qutebrowser.keyinput.basekeyparser import BaseKeyParser
+from PyQt5.QtWidgets import QApplication
+from PyQt5.QtCore import QEvent
+from PyQt5.QtGui import QKeySequence
+
+from qutebrowser.keyinput import basekeyparser, keyutils
 from qutebrowser.utils import message, utils
 from qutebrowser.commands import runners, cmdexc
 
 
-class CommandKeyParser(BaseKeyParser):
+class CommandKeyParser(basekeyparser.BaseKeyParser):
 
     """KeyChainParser for command bindings.
 
@@ -53,6 +57,8 @@ class PassthroughKeyParser(CommandKeyParser):
 
     Attributes:
         _mode: The mode this keyparser is for.
+        _orig_sequence: Cuerrent sequence with no key_mappings applied
+        _ignore_next_key: Whether to pass the next key through
     """
 
     do_log = False
@@ -68,7 +74,52 @@ class PassthroughKeyParser(CommandKeyParser):
         """
         super().__init__(win_id, parent)
         self._read_config(mode)
+        self._orig_sequence = keyutils.KeySequence()
         self._mode = mode
+        self._ignore_next_key = False
 
     def __repr__(self):
         return utils.get_repr(self, mode=self._mode)
+
+    def handle(self, e, *, dry_run=False):
+        """Override to pass the chain through on NoMatch
+
+        Args:
+            e: the KeyPressEvent from Qt.
+            dry_run: Don't actually execute anything, only check whether there
+                     would be a match.
+
+        Return:
+            A self.Match member.
+        """
+        if keyutils.is_modifier_key(e.key()) or self._ignore_next_key:
+            self._ignore_next_key = self._ignore_next_key and dry_run
+            return QKeySequence.NoMatch
+
+        orig_sequence = self._orig_sequence.append_event(e)
+        match = super().handle(e, dry_run=dry_run)
+
+        if not dry_run and match == QKeySequence.PartialMatch:
+            self._orig_sequence = orig_sequence
+
+        if dry_run or len(orig_sequence) == 1 or match != QKeySequence.NoMatch:
+            return match
+
+        window = QApplication.focusWindow()
+        if window is None:
+            return match
+
+        self._ignore_next_key = True
+        for keyinfo in orig_sequence:
+            press_event = keyinfo.to_event(QEvent.KeyPress)
+            release_event = keyinfo.to_event(QEvent.KeyRelease)
+            QApplication.postEvent(window, press_event)
+            QApplication.postEvent(window, release_event)
+
+        return QKeySequence.ExactMatch
+
+    def clear_keystring(self):
+        """Override to also clear the original sequence."""
+        if self._orig_sequence:
+            self._orig_sequence = keyutils.KeySequence()
+        super().clear_keystring()
